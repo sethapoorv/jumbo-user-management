@@ -18,13 +18,23 @@ export default function UsersDashboard() {
       </div>
       <section className="max-w-6xl mx-auto">
         <header className="px-6 py-6">
-          <h2 className="text-2xl font-bold">Users</h2>
-          <p className="text-sm text-slate-500">
+          <h2
+            className={`text-2xl font-bold ${
+              isDark ? "text-slate-100" : "text-slate-900"
+            }`}
+          >
+            Users
+          </h2>
+          <p
+            className={`text-sm ${
+              isDark ? "text-slate-300" : "text-slate-500"
+            }`}
+          >
             View, search, filter, add & manage users.
           </p>
         </header>
 
-        <UsersTable />
+        <UsersTable isDark={isDark} />
       </section>
     </main>
   );
