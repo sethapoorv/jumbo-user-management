@@ -1,4 +1,3 @@
-// src/services/users.service.ts
 import axios from "axios";
 import type { ApiUser } from "@/types/user.types";
 import type { PagedUsers } from "@/types/pagination";
