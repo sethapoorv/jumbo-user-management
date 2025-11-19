@@ -4,8 +4,10 @@ import { useState } from "react";
 import { ArrowRightIcon } from "@radix-ui/react-icons";
 import ToggleButton from "@/components/toggle-button/ToggleButton";
 import { useRouter } from "next/navigation";
+import { useAppStore } from "@/app/stores/useAppStore";
 
 export default function HomeSection() {
+  const dark = useAppStore((s) => s.dark);
   const [isDark, setIsDark] = useState(true);
   const router = useRouter();
 

@@ -1,10 +1,8 @@
+import Navbar from "@/components/navbar/NavBar";
 import "./globals.css";
-import ReactQueryProvider from "@/components/providers/ReactQueryProvider";
+import QueryProvider from "@/components/providers/ReactQueryProvider";
 
-export const metadata = {
-  title: "Jumbo User Management",
-  description: "Assignment App",
-};
+export const metadata = { title: "App" };
 
 export default function RootLayout({
   children,
@@ -13,8 +11,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>
-        <ReactQueryProvider>{children}</ReactQueryProvider>
+      <body className="w-full min-h-screen transition-colors bg-slate-50 text-slate-900 dark:bg-slate-900 dark:text-slate-100">
+        <Navbar />
+        <QueryProvider>{children}</QueryProvider>
       </body>
     </html>
   );

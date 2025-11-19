@@ -1,9 +1,9 @@
 "use client";
 
 import React, { useMemo, useState } from "react";
+import axios from "axios";
 import { useUsers } from "@/hooks/userUsers";
-import { ApiUser } from "@/types/user.types";
-
+import UserFormDialog, { UserFormData } from "@/components/modal/ModalPopup";
 import * as Avatar from "@radix-ui/react-avatar";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import * as Dialog from "@radix-ui/react-dialog";
@@ -18,6 +18,11 @@ import {
   ChevronUpIcon,
   MagnifyingGlassIcon,
 } from "@radix-ui/react-icons";
+import { PagedUsers } from "@/types/pagination";
+import { useQueryClient, useMutation } from "@tanstack/react-query";
+import type { ApiUser } from "@/types/user.types";
+import { USERS_QUERY_KEY_BASE } from "@/hooks/userUsers";
+import { useRouter } from "next/navigation";
 
 type Props = {
   isDark: boolean;
@@ -29,59 +34,246 @@ function initialsFromName(name: string) {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
-export default function UsersTable({ isDark }: Props) {
-  const { data: users, isLoading, isError, error } = useUsers();
+// Reusable Pagination component
+export function Pagination({
+  page,
+  totalPages,
+  onChange,
+  isDark,
+}: {
+  page: number;
+  totalPages: number;
+  onChange: (p: number) => void;
+  isDark?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between mt-4">
+      <div className="text-sm">
+        Page {page} of {totalPages}
+      </div>
 
-  // UI state
-  const [toDeleteId, setToDeleteId] = useState<number | null>(null);
-  const [dialogOpen, setDialogOpen] = useState(false);
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => onChange(Math.max(1, page - 1))}
+          disabled={page <= 1}
+          className={`px-3 py-1 rounded-md text-sm border ${
+            isDark
+              ? "bg-slate-800 border-slate-700 text-slate-200 disabled:opacity-50"
+              : "bg-white border-slate-200 text-slate-700 disabled:opacity-50"
+          }`}
+        >
+          Prev
+        </button>
+
+        <button
+          onClick={() => onChange(Math.min(totalPages, page + 1))}
+          disabled={page >= totalPages}
+          className={`px-3 py-1 rounded-md text-sm border ${
+            isDark
+              ? "bg-slate-800 border-slate-700 text-slate-200 disabled:opacity-50"
+              : "bg-white border-slate-200 text-slate-700 disabled:opacity-50"
+          }`}
+        >
+          Next
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export default function UsersTable({ isDark }: Props) {
+  // pagination
+  const [page, setPage] = useState(1);
+  const limit = 6; // change page size here
 
   // table controls
   const [query, setQuery] = useState("");
   const [emailSort, setEmailSort] = useState<"asc" | "desc">("asc");
   const [companyFilter, setCompanyFilter] = useState<string>("All");
 
-  if (isLoading)
-    return (
-      <div className={`p-6 ${isDark ? "text-slate-200" : "text-slate-700"}`}>
-        Loading users…
-      </div>
-    );
-  if (isError)
-    return (
-      <div className={`p-6 ${isDark ? "text-rose-300" : "text-rose-600"}`}>
-        {`Error: ${error?.message}`}
-      </div>
-    );
+  // UI state
+  const [toDeleteId, setToDeleteId] = useState<number | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
 
-  const openDeleteDialog = (id: number) => {
-    setToDeleteId(id);
-    setDialogOpen(true);
-  };
+  // Add / edit dialog
+  const [formOpen, setFormOpen] = useState(false);
+  const [editingUser, setEditingUser] = useState<UserFormData | null>(null);
 
-  const confirmDelete = () => {
-    alert(`Deleting user id ${toDeleteId} (implement mutation)`);
-    setDialogOpen(false);
-    setToDeleteId(null);
-  };
+  // React Query + data
+  const queryClient = useQueryClient();
+  const { data, isLoading, isError, error } = useUsers(page, limit);
 
-  // Extracting the unique companies sorted alphabetically
+  // normalize current page list
+  const list: ApiUser[] = data?.items ?? [];
+  const totalPages = data?.totalPages ?? 1;
+  const total = data?.total ?? list.length;
+  const router = useRouter();
+
+  // Mutations
+  // Delete mutation (optimistic)
+  const deleteUserMutation = useMutation<
+    void,
+    Error,
+    number,
+    { previous?: PagedUsers | undefined }
+  >({
+    mutationFn: async (id: number) => {
+      await axios.delete(`https://jsonplaceholder.typicode.com/users/${id}`);
+    },
+
+    // optimistic update
+    onMutate: async (id: number) => {
+      await queryClient.cancelQueries({ queryKey: [USERS_QUERY_KEY_BASE] });
+
+      const previous = queryClient.getQueryData<PagedUsers | undefined>([
+        USERS_QUERY_KEY_BASE,
+        page,
+        limit,
+      ]);
+
+      // remove user optimistically from this page
+      queryClient.setQueryData<PagedUsers | undefined>(
+        [USERS_QUERY_KEY_BASE, page, limit],
+        (old) => {
+          if (!old) return old;
+          return {
+            ...old,
+            items: old.items.filter((u) => u.id !== id),
+            total: Math.max(0, old.total - 1),
+          };
+        }
+      );
+
+      return { previous };
+    },
+
+    onError: (err, id, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(
+          [USERS_QUERY_KEY_BASE, page, limit],
+          context.previous
+        );
+      }
+    },
+  });
+
+  // save (create/edit) mutation (optimistic)
+  const saveUserMutation = useMutation<
+    ApiUser,
+    Error,
+    UserFormData,
+    { previous?: PagedUsers | undefined; tempId?: number }
+  >({
+    mutationFn: async (payload: UserFormData) => {
+      if (payload.id) {
+        const res = await axios.put<ApiUser>(
+          `https://jsonplaceholder.typicode.com/users/${payload.id}`,
+          payload
+        );
+        return res.data;
+      } else {
+        const res = await axios.post<ApiUser>(
+          "https://jsonplaceholder.typicode.com/users",
+          payload
+        );
+        return res.data;
+      }
+    },
+
+    onMutate: async (payload) => {
+      await queryClient.cancelQueries({ queryKey: [USERS_QUERY_KEY_BASE] });
+
+      const previous = queryClient.getQueryData<PagedUsers | undefined>([
+        USERS_QUERY_KEY_BASE,
+        page,
+        limit,
+      ]);
+
+      const tempId = payload.id ?? Date.now();
+
+      const optimistic: ApiUser = {
+        id: tempId,
+        name: payload.name,
+        email: payload.email,
+        phone: payload.phone ?? "",
+        company: { name: payload.company ?? "" } as any,
+        username: payload.email?.split("@")[0] ?? "",
+      } as ApiUser;
+
+      queryClient.setQueryData<PagedUsers | undefined>(
+        [USERS_QUERY_KEY_BASE, page, limit],
+        (old) => {
+          if (!old) {
+            return { items: [optimistic], total: 1, totalPages: 1 };
+          }
+
+          if (payload.id) {
+            // edit: update in place
+            return {
+              ...old,
+              items: old.items.map((u) =>
+                u.id === payload.id ? { ...u, ...optimistic } : u
+              ),
+            };
+          }
+
+          // create user
+          const newItems = [optimistic, ...old.items].slice(0, limit);
+          return {
+            ...old,
+            items: newItems,
+            total: old.total + 1,
+            totalPages: Math.max(
+              old.totalPages,
+              Math.ceil((old.total + 1) / limit)
+            ),
+          };
+        }
+      );
+
+      return { previous, tempId };
+    },
+
+    onError: (err, payload, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(
+          [USERS_QUERY_KEY_BASE, page, limit],
+          context.previous
+        );
+      }
+    },
+
+    onSuccess: (dataFromServer: ApiUser, variables, context) => {
+      const tempId = context?.tempId;
+
+      queryClient.setQueryData<PagedUsers | undefined>(
+        [USERS_QUERY_KEY_BASE, page, limit],
+        (old) => {
+          if (!old) return old;
+          return {
+            ...old,
+            items: old.items.map((u) =>
+              u.id === (variables.id ?? tempId)
+                ? { ...u, ...dataFromServer }
+                : u
+            ),
+          };
+        }
+      );
+    },
+  });
+
   const companies = useMemo(() => {
-    if (!users) return [];
     const set = new Set<string>();
-    users.forEach((u) => {
+    list.forEach((u) => {
       if (u.company?.name) set.add(u.company.name);
     });
     return ["All", ...Array.from(set).sort((a, b) => a.localeCompare(b))];
-  }, [users]);
+  }, [list]);
 
-  // Filter + sort users according to query, companyFilter, emailSort
   const filteredUsers = useMemo(() => {
-    if (!users) return [];
-
     const q = query.trim().toLowerCase();
-
-    let out = users.filter((u: ApiUser) => {
+    let out = list.filter((u) => {
       const matchesName =
         u.name.toLowerCase().includes(q) ||
         (u.username ?? "").toLowerCase().includes(q);
@@ -100,9 +292,58 @@ export default function UsersTable({ isDark }: Props) {
     });
 
     return out;
-  }, [users, query, companyFilter, emailSort]);
+  }, [list, query, companyFilter, emailSort]);
 
-  // Styling tokens
+  // UI functions
+  const openDeleteDialog = (id: number) => {
+    setToDeleteId(id);
+    setDialogOpen(true);
+  };
+
+  const confirmDelete = async () => {
+    if (toDeleteId == null) {
+      setDialogOpen(false);
+      return;
+    }
+
+    try {
+      await deleteUserMutation.mutateAsync(toDeleteId);
+      setDialogOpen(false);
+      setToDeleteId(null);
+    } catch (err) {
+      console.error("Delete failed", err);
+      setDialogOpen(false);
+      setToDeleteId(null);
+    }
+  };
+
+  const handleAddClick = () => {
+    setEditingUser(null);
+    setFormOpen(true);
+  };
+
+  const handleEditClick = (u: ApiUser) => {
+    setEditingUser({
+      id: u.id,
+      name: u.name,
+      email: u.email ?? "",
+      phone: u.phone ?? "",
+      company: u.company?.name ?? "",
+    });
+    setFormOpen(true);
+  };
+
+  const handleFormSubmit = async (dataPayload: UserFormData) => {
+    try {
+      await saveUserMutation.mutateAsync(dataPayload);
+      setFormOpen(false);
+      setEditingUser(null);
+    } catch (err) {
+      console.error("Failed to save:", err);
+    }
+  };
+
+  // styling tokens
   const containerBg = isDark
     ? "bg-slate-800 border-slate-700"
     : "bg-white border-slate-200";
@@ -118,12 +359,23 @@ export default function UsersTable({ isDark }: Props) {
   const overlayBg = isDark ? "bg-black/70" : "bg-black/40";
   const controlBg = isDark ? "bg-slate-700/40" : "bg-white";
 
+  if (isLoading)
+    return (
+      <div className={`p-6 ${isDark ? "text-slate-200" : "text-slate-700"}`}>
+        Loading users…
+      </div>
+    );
+  if (isError)
+    return (
+      <div
+        className={`p-6 ${isDark ? "text-rose-300" : "text-rose-600"}`}
+      >{`Error: ${error?.message}`}</div>
+    );
+
   return (
     <div className="p-6">
-      {/* Controls: Search, Company Select, Sort */}
-      <div
-        className={`mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between`}
-      >
+      {/* Controls */}
+      <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div className="flex items-center gap-2 w-full md:w-1/2">
           <div
             className={`relative flex items-center w-full ${controlBg} rounded-md border ${
@@ -159,7 +411,14 @@ export default function UsersTable({ isDark }: Props) {
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Radix Select for company filter */}
+          <button
+            onClick={handleAddClick}
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-md text-sm border bg-sky-600 text-white hover:bg-sky-500"
+            aria-label="Add user"
+          >
+            Add User
+          </button>
+
           <Select.Root
             value={companyFilter}
             onValueChange={(v) => setCompanyFilter(v)}
@@ -170,7 +429,7 @@ export default function UsersTable({ isDark }: Props) {
                 isDark
                   ? "border-slate-700 bg-slate-800 text-slate-100 focus:ring-slate-600"
                   : "border-slate-200 bg-white text-slate-700 focus:ring-slate-300"
-              } `}
+              }`}
             >
               <Select.Value />
               <Select.Icon
@@ -202,7 +461,6 @@ export default function UsersTable({ isDark }: Props) {
             </Select.Portal>
           </Select.Root>
 
-          {/* Sort by email toggle */}
           <button
             onClick={() => setEmailSort((s) => (s === "asc" ? "desc" : "asc"))}
             className={`inline-flex items-center gap-2 px-3 py-2 rounded-md text-sm border focus:outline-none focus:ring-2 focus:ring-offset-1 ${
@@ -230,6 +488,7 @@ export default function UsersTable({ isDark }: Props) {
         </div>
       </div>
 
+      {/* Table */}
       <div className={`overflow-x-auto rounded-lg border ${containerBg}`}>
         <table className="min-w-full divide-y">
           <thead className={`${headerBg}`}>
@@ -256,12 +515,23 @@ export default function UsersTable({ isDark }: Props) {
           </thead>
 
           <tbody className="bg- divide-y">
-            {filteredUsers.map((u: ApiUser) => (
-              <tr key={u.id} className={`${rowHover}`}>
+            {filteredUsers.map((u) => (
+              <tr
+                key={u.id ?? Math.random()}
+                className={`${rowHover} cursor-pointer`}
+                onClick={() => {
+                  if (u?.id == null) {
+                    console.warn("Row clicked but id missing", u);
+                    return;
+                  }
+                  router.push(`/users/${encodeURIComponent(String(u.id))}`);
+                }}
+              >
+                {/* Avatar */}
                 <td className="px-4 py-3">
                   <div className="flex items-center">
                     <Avatar.Root
-                      className={`inline-flex items-center justify-center align-middle rounded-full overflow-hidden select-none h-10 w-10 ${
+                      className={`inline-flex items-center justify-center align-middle rounded-full overflow-hidden h-10 w-10 ${
                         isDark ? "bg-indigo-500" : "bg-indigo-600"
                       }`}
                     >
@@ -280,6 +550,7 @@ export default function UsersTable({ isDark }: Props) {
                   </div>
                 </td>
 
+                {/* Name */}
                 <td className="px-4 py-3 text-sm">
                   <div className={`font-medium ${primaryText}`}>{u.name}</div>
                   <div className={`text-xs ${secondaryText}`}>
@@ -287,12 +558,15 @@ export default function UsersTable({ isDark }: Props) {
                   </div>
                 </td>
 
+                {/* Email */}
                 <td className={`px-4 py-3 text-sm ${mutedText}`}>{u.email}</td>
 
+                {/* Phone */}
                 <td className={`px-4 py-3 text-sm ${mutedText}`}>
                   {u.phone ?? "-"}
                 </td>
 
+                {/* Company */}
                 <td className={`px-4 py-3 text-sm ${mutedText}`}>
                   {u.company?.name ?? "-"}
                 </td>
@@ -301,7 +575,8 @@ export default function UsersTable({ isDark }: Props) {
                   <div className="flex items-center gap-2">
                     <DropdownMenu.Root>
                       <DropdownMenu.Trigger
-                        className={`inline-flex items-center justify-center p-2 rounded-md hover:bg-opacity-10 focus:outline-none focus:ring-2 focus:ring-offset-1 ${
+                        onClick={(e) => e.stopPropagation()}
+                        className={`inline-flex items-center justify-center p-2 rounded-md focus:outline-none ${
                           isDark
                             ? "hover:bg-slate-700 focus:ring-slate-500"
                             : "hover:bg-gray-100 focus:ring-slate-300"
@@ -321,12 +596,13 @@ export default function UsersTable({ isDark }: Props) {
                         className={`min-w-[160px] rounded-md shadow-lg p-1 border ${dropdownBg}`}
                       >
                         <DropdownMenu.Item
-                          className={`flex items-center gap-2 px-3 py-2 text-sm hover:bg-opacity-5 cursor-pointer rounded ${
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleEditClick(u);
+                          }}
+                          className={`flex items-center gap-2 px-3 py-2 text-sm cursor-pointer rounded ${
                             isDark ? "hover:bg-slate-700" : "hover:bg-slate-50"
                           }`}
-                          onSelect={() =>
-                            alert(`Edit user ${u.id} (implement later)`)
-                          }
                         >
                           <Pencil1Icon
                             className={`w-4 h-4 ${
@@ -343,12 +619,15 @@ export default function UsersTable({ isDark }: Props) {
                         </DropdownMenu.Item>
 
                         <DropdownMenu.Item
-                          className={`flex items-center gap-2 px-3 py-2 text-sm hover:bg-opacity-5 cursor-pointer rounded ${
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openDeleteDialog(u.id);
+                          }}
+                          className={`flex items-center gap-2 px-3 py-2 text-sm cursor-pointer rounded ${
                             isDark
                               ? "text-rose-300 hover:bg-slate-700"
                               : "text-rose-600 hover:bg-slate-50"
                           }`}
-                          onSelect={() => openDeleteDialog(u.id)}
                         >
                           <TrashIcon className="w-4 h-4" />
                           Delete
@@ -374,7 +653,15 @@ export default function UsersTable({ isDark }: Props) {
         </table>
       </div>
 
-      {/* Delete via Radix Dialog */}
+      {/* Pagination */}
+      <Pagination
+        page={page}
+        totalPages={totalPages}
+        onChange={(p) => setPage(p)}
+        isDark={isDark}
+      />
+
+      {/* Delete dialog */}
       <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
         <Dialog.Portal>
           <Dialog.Overlay className={`fixed inset-0 ${overlayBg}`} />
@@ -420,6 +707,19 @@ export default function UsersTable({ isDark }: Props) {
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
+
+      {/* User form dialog */}
+      <UserFormDialog
+        open={formOpen}
+        onOpenChange={(v) => {
+          setFormOpen(v);
+          if (!v) setEditingUser(null);
+        }}
+        initialData={editingUser}
+        onSubmit={handleFormSubmit}
+        isDark={isDark}
+        title={editingUser ? "Edit user" : "Add user"}
+      />
     </div>
   );
 }
