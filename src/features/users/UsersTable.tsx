@@ -23,6 +23,7 @@ import { useQueryClient, useMutation } from "@tanstack/react-query";
 import type { ApiUser } from "@/types/user.types";
 import { USERS_QUERY_KEY_BASE } from "@/hooks/userUsers";
 import { useRouter } from "next/navigation";
+import useAppStore from "@/app/stores/useAppStore";
 
 type Props = {
   isDark: boolean;
@@ -109,19 +110,22 @@ export default function UsersTable({ isDark }: Props) {
   const total = data?.total ?? list.length;
   const router = useRouter();
 
+  //Maintaining Logs
+  const addActivityLog = useAppStore((s) => s.addActivityLog);
+
   // Mutations
   // Delete mutation (optimistic)
   const deleteUserMutation = useMutation<
     void,
     Error,
     number,
-    { previous?: PagedUsers | undefined }
+    { previous?: PagedUsers | undefined; deletedUserName?: string }
   >({
     mutationFn: async (id: number) => {
       await axios.delete(`https://jsonplaceholder.typicode.com/users/${id}`);
     },
 
-    // optimistic update
+    // optimistic update + optimistic log
     onMutate: async (id: number) => {
       await queryClient.cancelQueries({ queryKey: [USERS_QUERY_KEY_BASE] });
 
@@ -131,7 +135,11 @@ export default function UsersTable({ isDark }: Props) {
         limit,
       ]);
 
-      // remove user optimistically from this page
+      // try to find the user name from current cache so we can log a friendly message
+      const deletedUserName =
+        previous?.items.find((u) => u.id === id)?.name ?? `id:${id}`;
+
+      // optimistic update of UI
       queryClient.setQueryData<PagedUsers | undefined>(
         [USERS_QUERY_KEY_BASE, page, limit],
         (old) => {
@@ -144,25 +152,70 @@ export default function UsersTable({ isDark }: Props) {
         }
       );
 
-      return { previous };
+      // optimistic activity log (instant feedback)
+      try {
+        addActivityLog({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          type: "user-deleted",
+          message: `Deleted user ${deletedUserName}`,
+          ts: Date.now(),
+          meta: { id },
+        });
+      } catch (e) {
+        // don't block UX if logging fails
+        console.warn("Failed to add optimistic log", e);
+      }
+
+      return { previous, deletedUserName };
     },
 
     onError: (err, id, context) => {
+      // rollback the optimistic update if error
       if (context?.previous) {
         queryClient.setQueryData(
           [USERS_QUERY_KEY_BASE, page, limit],
           context.previous
         );
       }
+
+      // error log
+      try {
+        addActivityLog({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          type: "user-deleted-failed",
+          message: `Failed deleting user ${context?.deletedUserName ?? id}`,
+          ts: Date.now(),
+          meta: { id, error: String(err) },
+        });
+      } catch {}
+    },
+
+    onSuccess: (_data, id, context) => {
+      // confirmed log
+      try {
+        addActivityLog({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          type: "user-deleted-confirmed",
+          message: `Confirmed deletion of ${
+            context?.deletedUserName ?? `id:${id}`
+          }`,
+          ts: Date.now(),
+          meta: { id },
+        });
+      } catch {}
     },
   });
 
-  // save (create/edit) mutation (optimistic)
+  // save (create/edit) mutation (optimistic) — with activity log
   const saveUserMutation = useMutation<
     ApiUser,
     Error,
     UserFormData,
-    { previous?: PagedUsers | undefined; tempId?: number }
+    {
+      previous?: PagedUsers | undefined;
+      tempId?: number;
+      optimisticName?: string;
+    }
   >({
     mutationFn: async (payload: UserFormData) => {
       if (payload.id) {
@@ -200,6 +253,7 @@ export default function UsersTable({ isDark }: Props) {
         username: payload.email?.split("@")[0] ?? "",
       } as ApiUser;
 
+      // update cache optimistically
       queryClient.setQueryData<PagedUsers | undefined>(
         [USERS_QUERY_KEY_BASE, page, limit],
         (old) => {
@@ -231,7 +285,23 @@ export default function UsersTable({ isDark }: Props) {
         }
       );
 
-      return { previous, tempId };
+      // optimistic log
+      try {
+        addActivityLog({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          type: payload.id ? "user-edited" : "user-added",
+          message: payload.id
+            ? `Edited user ${payload.name}`
+            : `Created user ${payload.name}`,
+          ts: Date.now(),
+          meta: { tempId, email: payload.email },
+        });
+      } catch (e) {
+        // non-blocking
+        console.warn("Activity log failed (optimistic)", e);
+      }
+
+      return { previous, tempId, optimisticName: payload.name };
     },
 
     onError: (err, payload, context) => {
@@ -241,6 +311,19 @@ export default function UsersTable({ isDark }: Props) {
           context.previous
         );
       }
+
+      // error log
+      try {
+        addActivityLog({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          type: payload.id ? "user-edit-failed" : "user-create-failed",
+          message: `${payload.id ? "Edit" : "Create"} failed for ${
+            context?.optimisticName ?? payload.name
+          }`,
+          ts: Date.now(),
+          meta: { error: String(err) },
+        });
+      } catch {}
     },
 
     onSuccess: (dataFromServer: ApiUser, variables, context) => {
@@ -260,6 +343,21 @@ export default function UsersTable({ isDark }: Props) {
           };
         }
       );
+
+      // confirmed log
+      try {
+        addActivityLog({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          type: variables.id ? "user-edited-confirmed" : "user-added-confirmed",
+          message: variables.id
+            ? `Confirmed edit: ${dataFromServer.name}`
+            : `Confirmed create: ${dataFromServer.name}`,
+          ts: Date.now(),
+          meta: { id: dataFromServer.id, email: dataFromServer.email },
+        });
+      } catch (e) {
+        console.warn("Activity log failed (confirmed)", e);
+      }
     },
   });
 
